@@ -151,7 +151,7 @@ Auto-publish changes:
 **Error**: Configuration validation fails with unsupported track type
 
 **Solution**:
-- Detailed Log and Extended Log require additional security blades (e.g., Threat Prevention)
+- Detailed Log and Extended Log require additional security blades (e.g., Application Control)
 - Verify required blades are enabled on gateways
 - Use standard "Log" option if advanced logging is not available
 
@@ -172,10 +172,6 @@ This script is provided as-is without warranty. Always test in a non-production 
 ## 📄 License
 
 This project is licensed under the MIT License.
-
-## 👤 Author
-
-Created by Massimiliano Cere ([@MaxCere](https://github.com/MaxCere))
 
 ## 📞 Support
 
