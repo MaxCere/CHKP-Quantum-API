@@ -176,6 +176,3 @@ This script is provided as-is without warranty. Always test in a non-production 
 For issues and questions:
 - Open an issue on [GitHub](https://github.com/MaxCere/CHKP-Quantum-API/issues)
 - Check Point Community: [https://community.checkpoint.com](https://community.checkpoint.com)
-
-- Basic logging configuration functionality
-- Support for standard track types (None, Log, Detailed Log, Extended Log)
