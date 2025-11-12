@@ -374,14 +374,6 @@ When running in non-interactive mode (`-Interactive:$false`), these parameters a
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-## 📄 License
-
-This project is licensed under the MIT License.
-
-## 👤 Author
-
-Created by Massimiliano Cere (MaxCere)
-
 ## ⚠️ Disclaimer
 
 This script is provided as-is without warranty. Always test in a non-production environment first.
