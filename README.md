@@ -171,38 +171,11 @@ This script is provided as-is without warranty. Always test in a non-production 
 - Tested changes in a lab environment
 - Understanding of the impact on your security posture
 
-## 📄 License
-
-This project is licensed under the MIT License.
-
 ## 📞 Support
 
 For issues and questions:
 - Open an issue on [GitHub](https://github.com/MaxCere/CHKP-Quantum-API/issues)
 - Check Point Community: [https://community.checkpoint.com](https://community.checkpoint.com)
 
-## 📚 Version History
-
-### v1.3 (2025-11-12)
-- Added real-time task monitoring for publish operations
-- Improved error handling and messages
-- Enhanced color-coded output
-- Fixed session cleanup issues
-- Added automatic discard of unpublished changes
-
-### v1.2 (2025-11-12)
-- Added support for Accounting, per-Connection, per-Session options
-- Implemented configuration validation before applying to all rules
-- Added changes summary before publish
-- Disabled automatic policy installation for safety
-
-### v1.1 (2025-11-12)
-- Added color-coded output for better readability
-- Improved user interface
-- Enhanced error messages
-- Better handling of access layers
-
-### v1.0 (2025-11-12)
-- Initial release
 - Basic logging configuration functionality
 - Support for standard track types (None, Log, Detailed Log, Extended Log)
