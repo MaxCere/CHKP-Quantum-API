@@ -77,7 +77,7 @@
     .\Quantum-Change-Logging.ps1 -MgmtServer 192.168.100.10 -User admin -Password "Pass" -PackageName "Standard" -RuleNames @("Grafana Access") -TrackType extended -AutoPublish -Interactive:$false -Quiet
 
 .NOTES
-    Author: Massimiliano Cere (MaxCere)
+    Author: MaxCere
     Version: 2.1
     
     IMPORTANT: Policy installation functionality is DISABLED by default.
