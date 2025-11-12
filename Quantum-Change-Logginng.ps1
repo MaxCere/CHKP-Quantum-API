@@ -448,30 +448,28 @@ function SetAccessRuleLogging {
     try {
         $headers = @{ "X-chkp-sid" = $sid }
         
-        # Build track object
+        # Build track object - ALWAYS include all options
         $trackObj = @{
             type = $trackType
         }
         
-        # Add options if specified
-        if ($accounting) {
-            $trackObj["accounting"] = $true
-        }
-        if ($perConnection) {
-            $trackObj["per-connection"] = $true
-        }
-        if ($perSession) {
-            $trackObj["per-session"] = $true
-        }
+        # ALWAYS set these options explicitly (true or false)
+        # Don't use if conditions - always send the value
+        $trackObj["accounting"] = [bool]$accounting
+        $trackObj["per-connection"] = [bool]$perConnection
+        $trackObj["per-session"] = [bool]$perSession
         
         $bodyObj = @{
             layer = $layerName
             uid = $ruleUid
             track = $trackObj
         }
+        
+              
         $body = $bodyObj | ConvertTo-Json -Depth 5
 
         $resp = Invoke-RestMethod -Uri "$MgmtServer/web_api/set-access-rule" -Headers $headers -Method Post -Body $body -ContentType "application/json" -UseBasicParsing
+               
         return @{ success = $true }
     }
     catch {
@@ -499,6 +497,8 @@ function SetAccessRuleLogging {
         return @{ success = $false; message = $errorMessage }
     }
 }
+
+
 
 function PublishPolicy {
     param($MgmtServer, $sid)
