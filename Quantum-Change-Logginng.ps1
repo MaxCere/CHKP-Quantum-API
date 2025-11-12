@@ -5,6 +5,7 @@
 .DESCRIPTION
     This script allows you to configure logging settings (Track) for Check Point Quantum access rules via Management API.
     Supports: Log, Detailed Log, Extended Log, None, Accounting, per-Connection, per-Session options.
+    Can be run interactively or fully automated via command-line parameters.
 
 .PARAMETER MgmtServer
     Management server address (IP or hostname)
@@ -16,23 +17,68 @@
     Management API password
 
 .PARAMETER PackageName
-    Policy package name (optional, will be prompted if not provided)
+    Policy package name
 
 .PARAMETER LayerName
-    Access layer name (optional, will be prompted if not provided)
+    Access layer name (optional if package has only one layer)
+
+.PARAMETER RuleSelection
+    Select rules: "all" for all rules, or leave empty for manual selection
+
+.PARAMETER RuleNumbers
+    Array of rule numbers to modify (e.g., @("1", "3", "5") or "all")
+
+.PARAMETER RuleNames
+    Array of rule names to modify (e.g., @("Rule1", "Rule2"))
+
+.PARAMETER TrackType
+    Track type: none, log, detailed-log (or "detailed log"), extended-log (or "extended log")
+    Also accepts: detail, extended, extend as shortcuts
+
+.PARAMETER Accounting
+    Enable Accounting option
+
+.PARAMETER PerConnection
+    Enable per-Connection logging
+
+.PARAMETER PerSession
+    Enable per-Session logging
 
 .PARAMETER Publish
-    Automatically publish changes after modification
+    Publish changes (will prompt for confirmation)
+
+.PARAMETER AutoPublish
+    Automatically publish changes without confirmation
 
 .PARAMETER Interactive
     Enable interactive mode (default: true)
 
+.PARAMETER Quiet
+    Suppress non-essential output
+
 .EXAMPLE
-    .\Quantum-Change-Logging.ps1 -MgmtServer 192.168.100.10 -User admin -Password Passw0rd
+    # Interactive mode (default)
+    .\Quantum-Change-Logging.ps1 -MgmtServer 192.168.100.10
+
+.EXAMPLE
+    # Fully automated - modify all rules
+    .\Quantum-Change-Logging.ps1 -MgmtServer 192.168.100.10 -User admin -Password "Pass" -PackageName "Standard" -RuleSelection all -TrackType log -Accounting -PerConnection -AutoPublish -Interactive:$false
+
+.EXAMPLE
+    # With spaces in TrackType
+    .\Quantum-Change-Logging.ps1 -MgmtServer 192.168.100.10 -User admin -Password "Pass" -PackageName "Standard" -RuleNumbers @("1","3") -TrackType "extended log" -AutoPublish -Interactive:$false
+
+.EXAMPLE
+    # With dashes in TrackType
+    .\Quantum-Change-Logging.ps1 -MgmtServer 192.168.100.10 -User admin -Password "Pass" -PackageName "Standard" -RuleSelection all -TrackType extended-log -AutoPublish -Interactive:$false
+
+.EXAMPLE
+    # Short form
+    .\Quantum-Change-Logging.ps1 -MgmtServer 192.168.100.10 -User admin -Password "Pass" -PackageName "Standard" -RuleNames @("Grafana Access") -TrackType extended -AutoPublish -Interactive:$false -Quiet
 
 .NOTES
-    Author: Check Point
-    Version: 1.3
+    Author: Massimiliano Cere (MaxCere)
+    Version: 2.1
     
     IMPORTANT: Policy installation functionality is DISABLED by default.
     Automatic policy installation is considered too risky as it has not been tested 
@@ -43,15 +89,56 @@
     the changes in the published policy package.
 #>
 
+[CmdletBinding()]
 param(
+    [Parameter(Mandatory=$true, HelpMessage="Management server address")]
     [string]$MgmtServer,
+    
+    [Parameter(Mandatory=$false)]
     [string]$User,
+    
+    [Parameter(Mandatory=$false)]
     [string]$Password,
+    
+    [Parameter(Mandatory=$false)]
     [string]$PackageName,
+    
+    [Parameter(Mandatory=$false)]
     [string]$LayerName,
+    
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("all", "")]
+    [string]$RuleSelection = "",
+    
+    [Parameter(Mandatory=$false)]
+    [string[]]$RuleNumbers,
+    
+    [Parameter(Mandatory=$false)]
+    [string[]]$RuleNames,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$TrackType = "",
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Accounting,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$PerConnection,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$PerSession,
+    
+    [Parameter(Mandatory=$false)]
     [switch]$Publish,
-    [switch]$Interactive = $true
-    # [switch]$Install  # DISABLED: Policy installation disabled for safety reasons
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$AutoPublish,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Interactive = $true,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$Quiet
 )
 
 # Color definitions
@@ -71,6 +158,11 @@ function Write-ColorOutput {
         [switch]$NoNewline
     )
     
+    # Skip non-essential output in Quiet mode
+    if ($Quiet -and $Color -notin @($Colors.Error, $Colors.Warning, $Colors.Success)) {
+        return
+    }
+    
     if ($NoNewline) {
         Write-Host $Message -ForegroundColor $Color -NoNewline
     } else {
@@ -78,15 +170,51 @@ function Write-ColorOutput {
     }
 }
 
+function Normalize-TrackType {
+    param([string]$TrackType)
+    
+    if (-not $TrackType) {
+        return ""
+    }
+    
+    # Normalize track type to API format
+    $normalizedType = switch -Regex ($TrackType.ToLower().Trim()) {
+        "^none$" { "none" }
+        "^log$" { "log" }
+        "^(detailed-log|detail|detailed|detailed\s+log)$" { "detailed log" }
+        "^(extended-log|extended|extend|extended\s+log)$" { "extended log" }
+        default { 
+            # Invalid track type
+            $validOptions = "none, log, detailed-log (or 'detailed log'), extended-log (or 'extended log')"
+            Write-ColorOutput "✗ Invalid TrackType: '$TrackType'" -Color $script:Colors.Error
+            Write-ColorOutput "  Valid options: $validOptions" -Color $script:Colors.Subtle
+            return $null
+        }
+    }
+    
+    return $normalizedType
+}
+
 function Authenticate {
     param($MgmtServer, $User, $Password)
 
     if (-not $User) { 
-        $User = Read-Host "Enter Management username" 
+        if ($Interactive) {
+            $User = Read-Host "Enter Management username"
+        } else {
+            Write-Error "Username is required in non-interactive mode"
+            return $null
+        }
     }
+    
     if (-not $Password) {
-        $Password = Read-Host "Enter Management password" -AsSecureString
-        $Password = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password))
+        if ($Interactive) {
+            $Password = Read-Host "Enter Management password" -AsSecureString
+            $Password = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password))
+        } else {
+            Write-Error "Password is required in non-interactive mode"
+            return $null
+        }
     }
 
     Write-ColorOutput "Authenticating to $MgmtServer..." -Color $Colors.Info
@@ -191,7 +319,6 @@ function WaitForTask {
                     }
                     return $true
                 }
-                # else: still in progress, continue loop
             }
         }
         catch {
@@ -273,13 +400,11 @@ function GetAccessRules {
         # Extract rules from response
         $rules = @()
         if ($resp.rulebase) {
-            # Rulebase can contain both direct rules and sections
             foreach ($item in $resp.rulebase) {
                 if ($item.type -eq "access-rule") {
                     $rules += $item
                 }
                 elseif ($item.type -eq "access-section" -and $item.rulebase) {
-                    # Section with nested rules
                     foreach ($subItem in $item.rulebase) {
                         if ($subItem.type -eq "access-rule") {
                             $rules += $subItem
@@ -289,7 +414,6 @@ function GetAccessRules {
             }
         }
         
-        # Return both rules and dictionary
         return @{
             rules = $rules
             objectDict = $objectDict
@@ -359,7 +483,6 @@ function SetAccessRuleLogging {
                 $responseBody = $reader.ReadToEnd()
                 $errorObj = $responseBody | ConvertFrom-Json
                 
-                # Extract only error message
                 if ($errorObj.errors -and $errorObj.errors.Count -gt 0) {
                     $errorMessage = $errorObj.errors[0].message
                 } elseif ($errorObj.message) {
@@ -385,12 +508,10 @@ function PublishPolicy {
         $body = $bodyObj | ConvertTo-Json
         $resp = Invoke-RestMethod -Uri "$MgmtServer/web_api/publish" -Headers $headers -Method Post -Body $body -ContentType "application/json" -UseBasicParsing
         
-        # Check if publish returned a task ID
         if ($resp.'task-id') {
             Write-ColorOutput "✓ Publish request submitted" -Color $Colors.Success
             Write-ColorOutput "  Task ID: $($resp.'task-id')" -Color $Colors.Subtle
             
-            # Wait for task completion
             $taskCompleted = WaitForTask -MgmtServer $MgmtServer -sid $sid -taskId $resp.'task-id'
             
             if ($taskCompleted) {
@@ -421,45 +542,6 @@ function PublishPolicy {
     }
 }
 
-<#
-.SYNOPSIS
-    Installs a policy package on its target gateways
-
-.DESCRIPTION
-    This function is DISABLED for safety reasons. Automatic policy installation
-    has not been tested in all scenarios and poses significant risks:
-    
-    - Could install policy on wrong gateway/cluster
-    - May cause service disruption if policy has errors
-    - No validation of target gateway readiness
-    - Potential for network connectivity loss
-    - Difficult to rollback if issues occur
-    
-    RECOMMENDATION: Always install policies manually through SmartConsole after 
-    thorough review and verification of the changes.
-
-.PARAMETER MgmtServer
-    Management server address
-
-.PARAMETER sid
-    Session ID from authentication
-
-.PARAMETER packageName
-    Name of the policy package to install
-
-.NOTES
-    To enable this function, uncomment the code below and the -Install parameter
-    in the script parameters section. Use at your own risk.
-#>
-function InstallPolicy {
-    param($MgmtServer, $sid, $packageName)
-    
-    # DISABLED: Policy installation is disabled for safety reasons
-    Write-ColorOutput "⚠ Policy installation is disabled for safety" -Color $Colors.Warning
-    Write-ColorOutput "  Please install the policy manually through SmartConsole" -Color $Colors.Subtle
-    return $false
-}
-
 function GetTrackValue {
     param($trackObj, $objectDict)
     
@@ -469,7 +551,6 @@ function GetTrackValue {
     
     $trackName = "None"
     
-    # If it's a string (UID), look it up in dictionary
     if ($trackObj -is [string]) {
         if ($objectDict.ContainsKey($trackObj)) {
             $trackName = $objectDict[$trackObj].name
@@ -477,20 +558,16 @@ function GetTrackValue {
             $trackName = $trackObj
         }
     }
-    # If it's an object with 'type' field
     elseif ($trackObj.type) {
-        # The type field may contain a UID, look it up in dictionary
         if ($objectDict.ContainsKey($trackObj.type)) {
             $trackName = $objectDict[$trackObj.type].name
         } else {
             $trackName = $trackObj.type
         }
     }
-    # If it's an object with 'name' field
     elseif ($trackObj.name) {
         $trackName = $trackObj.name
     }
-    # If it's an object with 'uid' field
     elseif ($trackObj.uid) {
         if ($objectDict.ContainsKey($trackObj.uid)) {
             $trackName = $objectDict[$trackObj.uid].name
@@ -499,7 +576,6 @@ function GetTrackValue {
         }
     }
     
-    # Add information about accounting, per-connection, per-session
     $details = @()
     if ($trackObj.accounting) {
         $details += "Accounting"
@@ -521,7 +597,6 @@ function GetTrackValue {
 function BuildTrackDescription {
     param($trackType, $accounting, $perConnection, $perSession)
     
-    # Convert track type to display name
     $trackName = switch ($trackType) {
         "none" { "None" }
         "log" { "Log" }
@@ -530,7 +605,6 @@ function BuildTrackDescription {
         default { $trackType }
     }
     
-    # Build details list
     $details = @()
     if ($accounting) {
         $details += "Accounting"
@@ -553,15 +627,41 @@ function BuildTrackDescription {
 # MAIN SCRIPT
 # ============================================
 
-Write-Host ""
-Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
-Write-ColorOutput "  Check Point Quantum - Access Rule Logging Configuration" -Color $Colors.Highlight
-Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
-Write-Host ""
-
-if (-not $MgmtServer) {
-    $MgmtServer = Read-Host "Enter Management Server address (with https://)"
+# Normalize and validate TrackType parameter
+if ($TrackType) {
+    $normalizedTrackType = Normalize-TrackType -TrackType $TrackType
+    if ($null -eq $normalizedTrackType) {
+        exit 1
+    }
+    $TrackType = $normalizedTrackType
 }
+
+# Validate non-interactive mode parameters
+if (-not $Interactive) {
+    $missingParams = @()
+    
+    if (-not $User) { $missingParams += "User" }
+    if (-not $Password) { $missingParams += "Password" }
+    if (-not $PackageName) { $missingParams += "PackageName" }
+    if (-not $TrackType) { $missingParams += "TrackType" }
+    if (-not $RuleSelection -and -not $RuleNumbers -and -not $RuleNames) {
+        $missingParams += "RuleSelection, RuleNumbers, or RuleNames"
+    }
+    
+    if ($missingParams.Count -gt 0) {
+        Write-Error "Non-interactive mode requires the following parameters: $($missingParams -join ', ')"
+        exit 1
+    }
+}
+
+if (-not $Quiet) {
+    Write-Host ""
+    Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
+    Write-ColorOutput "  Check Point Quantum - Access Rule Logging Configuration" -Color $Colors.Highlight
+    Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
+    Write-Host ""
+}
+
 if ($MgmtServer -notmatch "^https?://") {
     $MgmtServer = "https://$MgmtServer"
 }
@@ -572,11 +672,10 @@ if (-not $sid) {
     exit 1
 }
 
-# Track if changes were published
 $changesPublished = $false
 
 try {
-    # Discard any pending changes from previous sessions
+    # Discard any pending changes
     DiscardChanges -MgmtServer $MgmtServer -sid $sid | Out-Null
 
     # Retrieve policy packages
@@ -588,27 +687,40 @@ try {
         exit 1
     }
 
+    # Select package
     if (-not $PackageName) {
-        Write-Host ""
-        Write-ColorOutput "Available Policy Packages:" -Color $Colors.Highlight
-        Write-Host ""
-        for ($i=0; $i -lt $packages.Count; $i++) {
-            Write-ColorOutput "  [$($i+1)]" -Color $Colors.Info -NoNewline
-            Write-Host " $($packages[$i].name)"
+        if ($Interactive) {
+            Write-Host ""
+            Write-ColorOutput "Available Policy Packages:" -Color $Colors.Highlight
+            Write-Host ""
+            for ($i=0; $i -lt $packages.Count; $i++) {
+                Write-ColorOutput "  [$($i+1)]" -Color $Colors.Info -NoNewline
+                Write-Host " $($packages[$i].name)"
+            }
+            Write-Host ""
+            
+            do {
+                $scelta = Read-Host "Select package number"
+            } while (-not ($scelta -match "^\d+$") -or [int]$scelta -lt 1 -or [int]$scelta -gt $packages.Count)
+            
+            $PackageName = $packages[[int]$scelta - 1].name
+        } else {
+            Write-Error "PackageName is required in non-interactive mode"
+            exit 1
         }
-        Write-Host ""
-        
-        do {
-            $scelta = Read-Host "Select package number"
-        } while (-not ($scelta -match "^\d+$") -or [int]$scelta -lt 1 -or [int]$scelta -gt $packages.Count)
-        
-        $PackageName = $packages[[int]$scelta - 1].name
+    }
+    
+    # Validate package name
+    $selectedPackage = $packages | Where-Object { $_.name -eq $PackageName }
+    if (-not $selectedPackage) {
+        Write-ColorOutput "✗ Package '$PackageName' not found" -Color $Colors.Error
+        exit 1
     }
     
     Write-ColorOutput "`n→ Using package: " -Color $Colors.Subtle -NoNewline
     Write-ColorOutput $PackageName -Color $Colors.Highlight
 
-    # Retrieve layers associated with selected package
+    # Retrieve layers
     $packageLayers = GetPackageDetails -MgmtServer $MgmtServer -sid $sid -packageName $PackageName
     
     if (-not $packageLayers -or $packageLayers.Count -eq 0) {
@@ -616,35 +728,50 @@ try {
         exit 1
     }
 
-    # Convert to array if single object
     if ($packageLayers -isnot [System.Array]) {
         $packageLayers = @($packageLayers)
     }
 
-    # If there's only one layer, select it automatically
+    # Select layer
     if ($packageLayers.Count -eq 1) {
         $layerSelezionato = $packageLayers[0].name
         Write-ColorOutput "→ Access layer: " -Color $Colors.Subtle -NoNewline
         Write-ColorOutput $layerSelezionato -Color $Colors.Highlight
     }
-    else {
-        Write-Host ""
-        Write-ColorOutput "Available Access Layers in package '$PackageName':" -Color $Colors.Highlight
-        Write-Host ""
-        for ($i=0; $i -lt $packageLayers.Count; $i++) {
-            Write-ColorOutput "  [$($i+1)]" -Color $Colors.Info -NoNewline
-            Write-Host " $($packageLayers[$i].name)"
+    elseif ($LayerName) {
+        $selectedLayer = $packageLayers | Where-Object { $_.name -eq $LayerName }
+        if ($selectedLayer) {
+            $layerSelezionato = $LayerName
+            Write-ColorOutput "→ Access layer: " -Color $Colors.Subtle -NoNewline
+            Write-ColorOutput $layerSelezionato -Color $Colors.Highlight
+        } else {
+            Write-ColorOutput "✗ Layer '$LayerName' not found" -Color $Colors.Error
+            exit 1
         }
-        Write-Host ""
-        
-        do {
-            $sceltaLayer = Read-Host "Select access layer number"
-        } while (-not ($sceltaLayer -match "^\d+$") -or [int]$sceltaLayer -lt 1 -or [int]$sceltaLayer -gt $packageLayers.Count)
-        
-        $layerSelezionato = $packageLayers[[int]$sceltaLayer - 1].name
+    }
+    else {
+        if ($Interactive) {
+            Write-Host ""
+            Write-ColorOutput "Available Access Layers:" -Color $Colors.Highlight
+            Write-Host ""
+            for ($i=0; $i -lt $packageLayers.Count; $i++) {
+                Write-ColorOutput "  [$($i+1)]" -Color $Colors.Info -NoNewline
+                Write-Host " $($packageLayers[$i].name)"
+            }
+            Write-Host ""
+            
+            do {
+                $sceltaLayer = Read-Host "Select access layer number"
+            } while (-not ($sceltaLayer -match "^\d+$") -or [int]$sceltaLayer -lt 1 -or [int]$sceltaLayer -gt $packageLayers.Count)
+            
+            $layerSelezionato = $packageLayers[[int]$sceltaLayer - 1].name
+        } else {
+            Write-Error "LayerName is required when package has multiple layers in non-interactive mode"
+            exit 1
+        }
     }
 
-    # Retrieve access rules from selected layer
+    # Retrieve rules
     Write-ColorOutput "`nRetrieving rules from layer '$layerSelezionato'..." -Color $Colors.Info
     $response = GetAccessRules -MgmtServer $MgmtServer -sid $sid -layerName $layerSelezionato
     $rules = $response.rules
@@ -656,29 +783,70 @@ try {
     }
 
     Write-ColorOutput "✓ Found $($rules.Count) rules" -Color $Colors.Success
-    Write-Host ""
-    Write-ColorOutput "─────────────────────────────────────────────────────────" -Color $Colors.Subtle
+    
+    if (-not $Quiet) {
+        Write-Host ""
+        Write-ColorOutput "─────────────────────────────────────────────────────────" -Color $Colors.Subtle
+    }
 
-    # Display rules with logging status
+    # Display rules
     $i = 1
     $rules | ForEach-Object {
         $trackVal = GetTrackValue -trackObj $_.track -objectDict $objectDict
         
-        Write-ColorOutput "  [$i]" -Color $Colors.Info -NoNewline
-        Write-Host " $($_.name) " -NoNewline
-        Write-ColorOutput "→ " -Color $Colors.Subtle -NoNewline
-        Write-ColorOutput $trackVal -Color $Colors.Highlight
+        if (-not $Quiet) {
+            Write-ColorOutput "  [$i]" -Color $Colors.Info -NoNewline
+            Write-Host " $($_.name) " -NoNewline
+            Write-ColorOutput "→ " -Color $Colors.Subtle -NoNewline
+            Write-ColorOutput $trackVal -Color $Colors.Highlight
+        }
         
         $_ | Add-Member -MemberType NoteProperty -Name Index -Value $i -Force
         $_ | Add-Member -MemberType NoteProperty -Name TrackValue -Value $trackVal -Force
         $i++
     }
     
-    Write-ColorOutput "─────────────────────────────────────────────────────────" -Color $Colors.Subtle
+    if (-not $Quiet) {
+        Write-ColorOutput "─────────────────────────────────────────────────────────" -Color $Colors.Subtle
+    }
 
     # Select rules to modify
     $toModify = @()
-    if ($Interactive) {
+    
+    # Check if RuleSelection is "all" OR RuleNumbers contains "all"
+    if ($RuleSelection -eq "all" -or ($RuleNumbers -and $RuleNumbers[0] -eq "all")) {
+        $toModify = $rules
+    }
+    elseif ($RuleNumbers) {
+        foreach ($num in $RuleNumbers) {
+            # Skip if it's "all" (already handled above)
+            if ($num -eq "all") { continue }
+            
+            # Try to parse as integer
+            $numInt = 0
+            if ([int]::TryParse($num, [ref]$numInt)) {
+                $matchRule = $rules | Where-Object { $_.Index -eq $numInt }
+                if ($matchRule) { 
+                    $toModify += $matchRule 
+                } else {
+                    Write-ColorOutput "⚠ Rule number $num not found" -Color $Colors.Warning
+                }
+            } else {
+                Write-ColorOutput "⚠ Invalid rule number: $num" -Color $Colors.Warning
+            }
+        }
+    }
+    elseif ($RuleNames) {
+        foreach ($name in $RuleNames) {
+            $matchRule = $rules | Where-Object { $_.name -eq $name }
+            if ($matchRule) { 
+                $toModify += $matchRule 
+            } else {
+                Write-ColorOutput "⚠ Rule '$name' not found" -Color $Colors.Warning
+            }
+        }
+    }
+    elseif ($Interactive) {
         Write-Host ""
         $inputRules = Read-Host "Enter rule numbers to modify (comma-separated, or 'all' for all)"
         
@@ -711,74 +879,74 @@ try {
         Write-ColorOutput ")" -Color $Colors.Subtle
     }
     
-    # Logging configuration loop with retry
+    # Get track configuration
     $configurationDone = $false
     $newTrackDescription = ""
+    $selectedTrackType = $TrackType
+    $selectedAccounting = $Accounting.IsPresent
+    $selectedPerConnection = $PerConnection.IsPresent
+    $selectedPerSession = $PerSession.IsPresent
     
     while (-not $configurationDone) {
-        Write-Host ""
-        Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
-        Write-ColorOutput "  Track Configuration" -Color $Colors.Highlight
-        Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
-        Write-Host ""
-        Write-ColorOutput "  [1]" -Color $Colors.Info -NoNewline
-        Write-Host " None - No logging"
-        Write-ColorOutput "  [2]" -Color $Colors.Info -NoNewline
-        Write-Host " Log - Standard logging"
-        Write-ColorOutput "  [3]" -Color $Colors.Info -NoNewline
-        Write-Host " Detailed Log - Detailed logging"
-        Write-ColorOutput "  [4]" -Color $Colors.Info -NoNewline
-        Write-Host " Extended Log - Extended logging"
-        Write-Host ""
-        
-        do {
-            $trackChoice = Read-Host "Select track type"
-        } while ($trackChoice -notin @("1", "2", "3", "4"))
-        
-        $trackType = switch ($trackChoice) {
-            "1" { "none" }
-            "2" { "log" }
-            "3" { "detailed log" }
-            "4" { "extended log" }
-        }
-        
-        # Additional options (only if not "none")
-        $accounting = $false
-        $perConnection = $false
-        $perSession = $false
-        
-        if ($trackType -ne "none") {
+        if ($Interactive -and -not $TrackType) {
             Write-Host ""
-            $accountingInput = Read-Host "Enable Accounting? (y/n)"
-            $accounting = $accountingInput -eq "y"
+            Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
+            Write-ColorOutput "  Track Configuration" -Color $Colors.Highlight
+            Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
+            Write-Host ""
+            Write-ColorOutput "  [1]" -Color $Colors.Info -NoNewline
+            Write-Host " None - No logging"
+            Write-ColorOutput "  [2]" -Color $Colors.Info -NoNewline
+            Write-Host " Log - Standard logging"
+            Write-ColorOutput "  [3]" -Color $Colors.Info -NoNewline
+            Write-Host " Detailed Log - Detailed logging"
+            Write-ColorOutput "  [4]" -Color $Colors.Info -NoNewline
+            Write-Host " Extended Log - Extended logging"
+            Write-Host ""
             
-            $perConnectionInput = Read-Host "Log per Connection? (y/n)"
-            $perConnection = $perConnectionInput -eq "y"
+            do {
+                $trackChoice = Read-Host "Select track type"
+            } while ($trackChoice -notin @("1", "2", "3", "4"))
             
-            $perSessionInput = Read-Host "Log per Session? (y/n)"
-            $perSession = $perSessionInput -eq "y"
+            $selectedTrackType = switch ($trackChoice) {
+                "1" { "none" }
+                "2" { "log" }
+                "3" { "detailed log" }
+                "4" { "extended log" }
+            }
+            
+            if ($selectedTrackType -ne "none") {
+                Write-Host ""
+                $accountingInput = Read-Host "Enable Accounting? (y/n)"
+                $selectedAccounting = $accountingInput -eq "y"
+                
+                $perConnectionInput = Read-Host "Log per Connection? (y/n)"
+                $selectedPerConnection = $perConnectionInput -eq "y"
+                
+                $perSessionInput = Read-Host "Log per Session? (y/n)"
+                $selectedPerSession = $perSessionInput -eq "y"
+            }
         }
         
-        # Build new track description
-        $newTrackDescription = BuildTrackDescription -trackType $trackType -accounting $accounting -perConnection $perConnection -perSession $perSession
+        $newTrackDescription = BuildTrackDescription -trackType $selectedTrackType -accounting $selectedAccounting -perConnection $selectedPerConnection -perSession $selectedPerSession
         
         # Test configuration on first rule
         Write-Host ""
         Write-ColorOutput "Testing configuration on first rule..." -Color $Colors.Info
-        $testResult = SetAccessRuleLogging -MgmtServer $MgmtServer -sid $sid -layerName $layerSelezionato -ruleUid $toModify[0].uid -trackType $trackType -accounting $accounting -perConnection $perConnection -perSession $perSession
+        $testResult = SetAccessRuleLogging -MgmtServer $MgmtServer -sid $sid -layerName $layerSelezionato -ruleUid $toModify[0].uid -trackType $selectedTrackType -accounting $selectedAccounting -perConnection $selectedPerConnection -perSession $selectedPerSession
         
         if ($testResult.success) {
             Write-ColorOutput "✓ Configuration is valid!" -Color $Colors.Success
             $configurationDone = $true
             
-            # Apply to other rules if there are any
+            # Apply to other rules
             if ($toModify.Count -gt 1) {
                 Write-Host ""
                 Write-ColorOutput "Applying to remaining rules..." -Color $Colors.Info
                 $successCount = 1
                 for ($i = 1; $i -lt $toModify.Count; $i++) {
                     Write-ColorOutput "  → Modifying rule '$($toModify[$i].name)'..." -Color $Colors.Subtle
-                    $result = SetAccessRuleLogging -MgmtServer $MgmtServer -sid $sid -layerName $layerSelezionato -ruleUid $toModify[$i].uid -trackType $trackType -accounting $accounting -perConnection $perConnection -perSession $perSession
+                    $result = SetAccessRuleLogging -MgmtServer $MgmtServer -sid $sid -layerName $layerSelezionato -ruleUid $toModify[$i].uid -trackType $selectedTrackType -accounting $selectedAccounting -perConnection $selectedPerConnection -perSession $selectedPerSession
                     if ($result.success) {
                         $successCount++
                     }
@@ -793,20 +961,27 @@ try {
         else {
             Write-Host ""
             Write-ColorOutput "✗ Error: $($testResult.message)" -Color $Colors.Error
-            Write-Host ""
-            $retry = Read-Host "Do you want to choose a different configuration? (y/n)"
-            if ($retry -ne "y") {
-                Write-ColorOutput "Operation cancelled." -Color $Colors.Warning
-                # Discard changes before exit
-                Write-ColorOutput "Discarding unpublished changes..." -Color $Colors.Info
+            
+            if ($Interactive) {
+                Write-Host ""
+                $retry = Read-Host "Do you want to choose a different configuration? (y/n)"
+                if ($retry -ne "y") {
+                    Write-ColorOutput "Operation cancelled." -Color $Colors.Warning
+                    DiscardChanges -MgmtServer $MgmtServer -sid $sid | Out-Null
+                    exit 0
+                }
+                # Reset TrackType to force re-prompting
+                $selectedTrackType = ""
+            } else {
+                Write-ColorOutput "Operation failed in non-interactive mode." -Color $Colors.Error
                 DiscardChanges -MgmtServer $MgmtServer -sid $sid | Out-Null
-                exit 0
+                exit 1
             }
         }
     }
 
-    # Show summary before publish
-    if ($configurationDone) {
+    # Show summary
+    if ($configurationDone -and -not $Quiet) {
         Write-Host ""
         Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
         Write-ColorOutput "  Changes Summary" -Color $Colors.Highlight
@@ -828,61 +1003,55 @@ try {
     }
 
     # Publish changes
-    if ($configurationDone -and ($Publish -or $Interactive)) {
-        Write-Host ""
-        $publishChoice = Read-Host "Publish changes? (y/n)"
-        if ($publishChoice -eq "y") {
+    if ($configurationDone) {
+        $shouldPublish = $false
+        
+        if ($AutoPublish) {
+            $shouldPublish = $true
+        }
+        elseif ($Publish -or $Interactive) {
+            if ($Interactive) {
+                Write-Host ""
+                $publishChoice = Read-Host "Publish changes? (y/n)"
+                $shouldPublish = $publishChoice -eq "y"
+            } else {
+                $shouldPublish = $Publish.IsPresent
+            }
+        }
+        
+        if ($shouldPublish) {
             $changesPublished = PublishPolicy -MgmtServer $MgmtServer -sid $sid
-            # After successful publish, locks are automatically released by Check Point API
-            # DO NOT discard after publish - it would undo the published changes!
         }
         else {
-            # User chose not to publish, discard changes to release locks
             Write-Host ""
             Write-ColorOutput "Discarding unpublished changes..." -Color $Colors.Info
             DiscardChanges -MgmtServer $MgmtServer -sid $sid
         }
     }
 
-    <#
-    # POLICY INSTALLATION - DISABLED FOR SAFETY
-    # 
-    # Automatic policy installation is disabled because:
-    # - Not tested in all deployment scenarios
-    # - Risk of installing on wrong gateway/cluster
-    # - Could cause service disruption
-    # - Difficult to rollback automatically
-    # 
-    # To enable, uncomment this section and add -Install parameter above
-    
-    # Install policy (only if published)
-    if ($changesPublished -and ($Install -or $Interactive)) {
-        Write-Host ""
-        $installChoice = Read-Host "Install policy now? (y/n)"
-        if ($installChoice -eq "y") {
-            InstallPolicy -MgmtServer $MgmtServer -sid $sid -packageName $PackageName | Out-Null
-        }
-    }
-    #>
-    
-    # Reminder to install policy manually
+    # Reminder
     if ($changesPublished) {
         Write-Host ""
         Write-ColorOutput "⚠ NEXT STEP: Install the policy manually through SmartConsole" -Color $Colors.Warning
         Write-ColorOutput "  to apply the changes to your gateways." -Color $Colors.Subtle
     }
     
-    Write-Host ""
-    Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
-    if ($changesPublished) {
-        Write-ColorOutput "  Operation Completed Successfully" -Color $Colors.Success
+    if (-not $Quiet) {
+        Write-Host ""
+        Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
+        if ($changesPublished) {
+            Write-ColorOutput "  Operation Completed Successfully" -Color $Colors.Success
+        }
+        else {
+            Write-ColorOutput "  Operation Completed (No Changes Published)" -Color $Colors.Warning
+        }
+        Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
+        Write-Host ""
     }
-    else {
-        Write-ColorOutput "  Operation Completed (No Changes Published)" -Color $Colors.Warning
-    }
-    Write-ColorOutput "═══════════════════════════════════════════════════════════" -Color $Colors.Highlight
-    Write-Host ""
 }
 finally {
     Logout -MgmtServer $MgmtServer -sid $sid
 }
+
+
+
