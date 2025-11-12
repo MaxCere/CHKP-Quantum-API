@@ -81,6 +81,7 @@ Auto-publish changes:
 - **Accounting** - Enable accounting logs
 - **Per-Connection** - Log each connection separately
 - **Per-Session** - Log each session separately
+more details here: [R82 SmartConsole Help - Track Settings](https://sc1.checkpoint.com/documents/R82/SmartConsole_OLH/EN/Topics-OLH/Agb31EQtegrfJA5m6BGBOA2.htm?cshid=Agb31EQtegrfJA5m6BGBOA2) 
 
 ## 🔄 Workflow
 
